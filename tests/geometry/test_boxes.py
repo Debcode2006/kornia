@@ -411,11 +411,58 @@ class TestBoxes2D(BaseTester):
         batched_bbox = torch.stack([_create_tensor_box(), _create_tensor_box()])
         assert Boxes(batched_bbox)
 
+    # The default dtype and what integer coordinates are cast to under it: never half (#6316).
+    _coordinate_dtypes_6316 = {
+        torch.float32: torch.float32,
+        torch.float64: torch.float64,
+        torch.float16: torch.float32,
+        torch.bfloat16: torch.float32,
+    }
+
+    @pytest.mark.parametrize("default", list(_coordinate_dtypes_6316), ids=str)
+    def test_integer_input_cast_follows_the_default_dtype_6316(self, default, device):
+        # Under a float16 or bfloat16 default, integer corners above 2048 or 256 were stored in half precision and
+        # moved (2049 -> 2048). Every integer entry point and the integer transformation matrix follow one rule.
+        if device.type == "mps" and default == torch.float64:
+            pytest.skip("MPS does not support float64")
+        expected = self._coordinate_dtypes_6316[default]
+        vertices = torch.tensor([[[2049, 2051], [2051, 2051], [2051, 2053], [2049, 2053]]], device=device)
+        xyzxyz = torch.tensor([[2049, 257, 259, 2051, 261, 2053]], device=device)
+        translate = torch.tensor([[1, 0, 2049], [0, 1, 257], [0, 0, 1]], device=device)
+        old_default = torch.get_default_dtype()
+        try:
+            torch.set_default_dtype(default)
+            boxes = {
+                "Boxes": Boxes(vertices, raise_if_not_floating_point=False),
+                "Boxes.from_tensor": Boxes.from_tensor(vertices, mode="vertices_plus"),
+                "VideoBoxes.from_tensor": VideoBoxes.from_tensor(vertices[None, None]),
+            }
+            boxes3d = Boxes3D.from_tensor(xyzxyz, mode="xyzxyz_plus")
+            boxes3d_ctor = Boxes3D(boxes3d.data.long(), raise_if_not_floating_point=False)
+            translated = boxes["Boxes.from_tensor"].transform_boxes(translate)
+        finally:
+            torch.set_default_dtype(old_default)
+        for name, box in boxes.items():
+            assert box.data.dtype == expected, name
+            self.assert_close(box.data.reshape(vertices.shape), vertices.to(expected), atol=0.0, rtol=0.0)
+        assert boxes3d.data.dtype == boxes3d_ctor.data.dtype == expected
+        self.assert_close(boxes3d.to_tensor(mode="xyzxyz_plus"), xyzxyz.to(expected), atol=0.0, rtol=0.0)
+        self.assert_close(boxes3d_ctor.data, boxes3d.data, atol=0.0, rtol=0.0)
+        offset = torch.tensor([2049, 257], device=device, dtype=expected)
+        assert translated.data.dtype == expected
+        self.assert_close(translated.data, vertices.to(expected) + offset, atol=0.0, rtol=0.0)
+
+    def test_half_input_keeps_its_dtype_6316(self, device):
+        # Floating-point input is the caller's explicit choice and is not cast.
+        vertices = torch.tensor([[[1, 1], [4, 1], [4, 3], [1, 3]]], device=device, dtype=torch.float16)
+        assert Boxes(vertices).data.dtype == torch.float16
+        assert Boxes.from_tensor(vertices, mode="vertices_plus").data.dtype == torch.float16
+
     def test_integer_input_respects_default_dtype_4379(self, device):
         # kornia#4379: integer boxes and transformation matrices were hardcoded to
         # float32 (`.float()`) regardless of the caller's default dtype. They now
-        # cast to torch.get_default_dtype(). Pin the fix end to end and restore the
-        # global default so the test cannot leak state to siblings.
+        # cast to float32, or float64 under that default (#6316). Pin the fix end to end
+        # and restore the global default so the test cannot leak state to siblings.
         # MPS does not support float64, so skip on MPS.
         if device.type == "mps":
             pytest.skip("MPS does not support float64; this test exercises the cast under float64")
@@ -2016,13 +2063,14 @@ class TestBbox3D(BaseTester):
 
     def test_wart_constructor_and_from_tensor_have_different_integer_policies_4012(self, device):
         # Wart pin for kornia#4012 (its 3D form): the constructor rejects integer coordinates
-        # unless told to cast, while from_tensor silently casts them to the default dtype.
+        # unless told to cast, while from_tensor silently casts them to float32, or float64 under that default.
+        coordinate_dtype = torch.promote_types(torch.get_default_dtype(), torch.float32)
         vertices = torch.tensor([[[1, 2, 3]] * 8], device=device)
         with pytest.raises(ValueError, match="floating point"):
             Boxes3D(vertices)
-        assert Boxes3D(vertices, raise_if_not_floating_point=False).dtype == torch.get_default_dtype()
+        assert Boxes3D(vertices, raise_if_not_floating_point=False).dtype == coordinate_dtype
         integer = torch.tensor([[1, 2, 3, 5, 5, 8]], device=device)
-        assert Boxes3D.from_tensor(integer, mode="xyzxyz").dtype == torch.get_default_dtype()
+        assert Boxes3D.from_tensor(integer, mode="xyzxyz").dtype == coordinate_dtype
         assert Boxes3D.from_tensor(integer.to(torch.float16), mode="xyzxyz").dtype == torch.float16
 
     def test_wart_to_tensor_default_mode_ignores_the_stored_label_4251(self, device, dtype):

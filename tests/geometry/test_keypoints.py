@@ -233,6 +233,40 @@ class TestKeypoints(BaseTester):
         kp = Keypoints(data, raise_if_not_floating_point=False)
         assert kp.dtype == torch.float32
 
+    # The default dtype and what integer coordinates are cast to under it: never half (#6316).
+    _coordinate_dtypes_6316 = {
+        torch.float32: torch.float32,
+        torch.float64: torch.float64,
+        torch.float16: torch.float32,
+        torch.bfloat16: torch.float32,
+    }
+
+    @pytest.mark.parametrize("default", list(_coordinate_dtypes_6316), ids=str)
+    def test_int_input_cast_follows_the_default_dtype_6316(self, default, device):
+        # Integer keypoints were cast to float32 even under a float64 default. The values exceed what float16
+        # (2048) and bfloat16 (256) hold exactly, so a half cast would move them.
+        if device.type == "mps" and default == torch.float64:
+            pytest.skip("MPS does not support float64")
+        expected = self._coordinate_dtypes_6316[default]
+        data = torch.tensor([[[2049, 2051], [257, 259]]], device=device)
+        data3d = torch.tensor([[[2049, 2051, 257]]], device=device)
+        old_default = torch.get_default_dtype()
+        try:
+            torch.set_default_dtype(default)
+            kp = Keypoints(data, raise_if_not_floating_point=False)
+            kp3d = Keypoints3D(data3d, raise_if_not_floating_point=False)
+        finally:
+            torch.set_default_dtype(old_default)
+        assert kp.data.dtype == expected
+        assert kp3d.data.dtype == expected
+        self.assert_close(kp.data, data.to(expected), atol=0.0, rtol=0.0)
+        self.assert_close(kp3d.data, data3d.to(expected), atol=0.0, rtol=0.0)
+
+    def test_half_input_keeps_its_dtype_6316(self, device):
+        # Floating-point input is the caller's explicit choice and is not cast.
+        assert Keypoints(torch.ones(1, 5, 2, device=device, dtype=torch.float16)).data.dtype == torch.float16
+        assert Keypoints3D(torch.ones(1, 5, 3, device=device, dtype=torch.float16)).data.dtype == torch.float16
+
     def test_gradcheck(self, device):
         data = torch.rand(1, 5, 2, device=device, dtype=torch.float64, requires_grad=True)
         M = torch.eye(3, device=device, dtype=torch.float64).unsqueeze(0)

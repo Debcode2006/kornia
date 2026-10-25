@@ -218,6 +218,15 @@ def _normalize_to_float32_or_float64(dtype: torch.dtype) -> torch.dtype:
     return dtype if dtype in (torch.float32, torch.float64) else torch.float32
 
 
+def _coordinate_dtype() -> torch.dtype:
+    """Return the floating dtype that integer coordinates are cast to: ``float32``, or ``float64`` under that default.
+
+    Never a half type: ``float16`` holds integers exactly only up to 2048 and ``bfloat16`` up to 256, which ordinary
+    image coordinates exceed (#6316).
+    """
+    return torch.promote_types(torch.get_default_dtype(), torch.float32)
+
+
 def _l2_normalize(input: torch.Tensor, dim: int = 1) -> torch.Tensor:
     """L2-normalise ``input`` along ``dim`` with :func:`torch.nn.functional.normalize`'s default ``eps``.
 
